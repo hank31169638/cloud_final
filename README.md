@@ -1,60 +1,68 @@
-# Nexus AI - X-Ops Mapping Platform
+# SecOps SAST Scanner
 
-A comprehensive web application for managing AI Infrastructure with a focus on LLMOps, AgentOps, AI SecOps, DataOps, and DevOps.
+A **Static Application Security Testing (SAST)** tool that scans GitHub repositories for security vulnerabilities, secrets, and insecure code patterns.
 
-## Features
+## 🔐 Features
 
-### 🔐 GitHub Integration
-- Landing page with GitHub repository connection
-- Simulated repository cloning and analysis
-- Project health score calculation
+### GitHub Integration
+- GitHub OAuth authentication via Supabase
+- Browse and import any accessible GitHub repository
+- Real-time repository file tree exploration
 
-### 📊 Dashboard
-- Overall health score visualization
-- Real-time metrics for security, performance, reliability, and cost
-- Token usage and cost analytics charts
+### 🛡️ SAST Security Scanner
+- **20+ Security Rules** detecting:
+  - 🔑 **Secrets & API Keys**: OpenAI keys (sk-), GitHub tokens (ghp_, gho_), AWS keys (AKIA)
+  - 🔐 **Credentials**: Hardcoded passwords, database connection strings
+  - 👤 **PII Detection**: Email addresses, phone numbers, SSN patterns
+  - ⚠️ **Insecure Patterns**: debug=true, 0.0.0.0 binding, eval(), dangerouslySetInnerHTML
 
-### 🧠 LLMOps
-- **Prompt Registry**: Side-by-side diff viewer for prompt versions
-- **Model Router**: Configure primary and fallback models (GPT-4o → Claude 3.5)
-- **Cost Analytics**: Track token usage, costs, and API requests
+### 📊 Security Dashboard
+- Risk level indicators (Critical, High, Medium, Low)
+- File-level vulnerability counts
+- Interactive file tree with security badges
+- Annotated code viewer with line-level highlighting
 
-### 🕵️ AgentOps
-- **Trace Observability**: Waterfall chart showing agent execution flow
-  - User Input → Agent Thought → Tool Call → Final Answer
-- **Tool Registry**: Manage and monitor active/disabled tools
+### 🎯 Code Annotation
+- Hover tooltips with vulnerability details
+- Security recommendations for each issue
+- Color-coded severity levels
 
-### 🛡️ AI SecOps
-- **Guardrails**: Configure security thresholds
-  - Toxicity filter
-  - PII masking
-  - Prompt injection detection
-  - Jailbreak prevention
-- **Security Logs**: View blocked threats and security events
+## 🛠️ Technology Stack
 
-### 📚 DataOps
-- **Knowledge Base**: File upload simulation and document management
-- **Retrieval Eval**: RAG performance metrics
-  - Hit rate radial chart
-  - Precision, recall, MRR metrics
-  - Query performance analysis
+| Category | Technology | Purpose |
+|----------|------------|---------|
+| **Frontend** | React 18 | UI Framework |
+| **Build Tool** | Vite 5 | Dev server & bundling |
+| **Backend (BaaS)** | Supabase | Authentication & PostgreSQL |
+| **Auth** | GitHub OAuth | User authentication |
+| **API** | GitHub REST API | Repository access |
+| **Charts** | Recharts | Data visualization |
+| **Icons** | Lucide React | Icon library |
+| **Deployment** | Vercel | Hosting platform |
 
-### ⚙️ DevOps (CI/CD)
-- **Pipeline Status**: Visual CI/CD flow
-  - Code Commit → Static Analysis → Prompt Testing → Deploy
-- **Validation Report**: Pass/Fail tests for agent logic
-  - Infinite loop prevention
-  - Token limits
-  - Security checks
+## 📁 Project Structure
 
-## Design System
+```
+src/
+├── components/
+│   ├── GitHubModal.jsx      # GitHub OAuth & repo import
+│   ├── Sidebar.jsx          # Navigation with project switcher
+│   ├── Dashboard.jsx        # Overview dashboard
+│   ├── SecOps.jsx           # SAST security scanner (main feature)
+│   └── FileTreeExplorer.jsx # Reusable file tree component
+├── context/
+│   └── FileContext.jsx      # Shared file state
+├── lib/
+│   ├── supabase.js          # Supabase client & auth
+│   └── githubAPI.js         # GitHub API helpers
+├── data/
+│   └── mockData.js          # Demo data
+├── App.jsx                  # Main app with routing
+├── main.jsx                 # Entry point
+└── index.css                # Global styles
+```
 
-- **Dark Mode**: Deep blues (#0a0e1a) with cyber-security aesthetic
-- **Neon Accents**: Cyan (#00d4ff), Purple (#a855f7), Red (#ff4444)
-- **Glassmorphism**: Translucent panels with backdrop blur
-- **Data Visualization**: Recharts library for professional charts
-
-## Installation
+## 🚀 Installation
 
 ```bash
 # Install dependencies
@@ -67,71 +75,46 @@ npm run dev
 npm run build
 ```
 
-## Technology Stack
+## ⚙️ Environment Variables
 
-- **React 18**: UI framework
-- **Vite**: Build tool and dev server
-- **Recharts**: Data visualization library
-- **Lucide React**: Icon library
+Create a `.env` file:
 
-## Project Structure
-
-```
-src/
-├── components/
-│   ├── GitHubModal.jsx      # Landing page with GitHub integration
-│   ├── Sidebar.jsx          # Navigation sidebar
-│   ├── Dashboard.jsx        # Main dashboard view
-│   ├── LLMOps.jsx          # LLM operations module
-│   ├── AgentOps.jsx        # Agent operations module
-│   ├── SecOps.jsx          # Security operations module
-│   ├── DataOps.jsx         # Data operations module
-│   └── DevOps.jsx          # DevOps CI/CD module
-├── data/
-│   └── mockData.js         # Realistic mock data
-├── App.jsx                 # Main application component
-├── main.jsx               # React entry point
-└── index.css              # Global styles
-
+```env
+VITE_SUPABASE_URL=your_supabase_url
+VITE_SUPABASE_ANON_KEY=your_supabase_anon_key
 ```
 
-## Mock Data
+## 🔧 Setup
 
-The application uses comprehensive mock data to simulate a real AI infrastructure platform:
-- 7 days of cost analytics
-- Agent execution traces with waterfall timing
-- Security logs with various threat types
-- Knowledge base documents
-- CI/CD pipeline stages
-- Validation test results
+1. **Supabase Setup**:
+   - Create a Supabase project
+   - Enable GitHub OAuth in Authentication → Providers
+   - Configure redirect URLs
 
-## Usage
+2. **GitHub OAuth**:
+   - Create a GitHub OAuth App
+   - Set callback URL to Supabase auth callback
+   - Add Client ID/Secret to Supabase
 
-1. **Start**: Enter a GitHub repository URL (e.g., `github.com/user/agent-bot`)
-2. **Loading**: Watch the simulated scanning process
-3. **Dashboard**: View overall health score and metrics
-4. **Navigate**: Use sidebar to explore different X-Ops modules
-5. **Interact**: Configure settings, view charts, and analyze data
+3. **Deploy to Vercel**:
+   - Connect GitHub repo
+   - Add environment variables
+   - Update Supabase redirect URLs
 
-## Key Features Demonstrated
+## 📖 Usage
 
-- ✅ Responsive glassmorphism UI
-- ✅ Real-time data visualization
-- ✅ Interactive controls (sliders, toggles, dropdowns)
-- ✅ Waterfall chart for agent traces
-- ✅ Radial charts for metrics
-- ✅ Professional table layouts
-- ✅ Cyber-security aesthetic
-- ✅ Dense data presentation
-- ✅ Smooth animations and transitions
+1. **Login**: Click "Connect GitHub" to authenticate
+2. **Import Repo**: Select a repository to scan
+3. **Scan**: Navigate to SecOps to view security analysis
+4. **Review**: Click on files to see annotated vulnerabilities
+5. **Fix**: Follow recommendations to resolve issues
 
-## Browser Support
+## 🎨 Design
 
-Modern browsers with ES6+ support:
-- Chrome/Edge (latest)
-- Firefox (latest)
-- Safari (latest)
+- **Dark Theme**: Deep blues with cyber-security aesthetic
+- **Glassmorphism**: Translucent panels with backdrop blur
+- **Neon Accents**: Cyan (#00d4ff), Purple (#a855f7), Red (#ff4444)
 
-## License
+## 📜 License
 
 MIT
