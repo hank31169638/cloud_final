@@ -1,20 +1,59 @@
 import React, { useState, useEffect } from 'react';
-import { Github, AlertCircle, Loader2, ExternalLink, Lock, CheckCircle, Star, GitFork, Clock } from 'lucide-react';
+import { Github, AlertCircle, Loader2, ExternalLink, Lock, CheckCircle, Star, GitFork, Clock, Search, AlertTriangle, Sparkles, Folder, FileCode, Package } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 
-function GitHubModal({ onClose, onComplete }) {
-  const [step, setStep] = useState('auth'); // 'auth' | 'select'
+// AI/ML library keywords to detect
+const AI_KEYWORDS = [
+  'openai', 'langchain', 'llama-index', 'llamaindex', 'anthropic', 
+  'transformers', 'pytorch', 'torch', 'tensorflow', 'pinecone', 
+  'chromadb', 'chroma', 'weaviate', 'qdrant', 'milvus',
+  'huggingface', 'sentence-transformers', 'tiktoken', 'cohere',
+  'replicate', 'stability-ai', 'diffusers', 'auto-gpt', 'autogen',
+  'semantic-kernel', 'guidance', 'dspy', 'litellm', 'ollama'
+];
+
+// Common AI project folder patterns
+const AI_FOLDER_PATTERNS = ['prompts', 'agents', 'chains', 'llm', 'models', 'embeddings', 'vectors', 'rag'];
+
+// Common AI project file patterns
+const AI_FILE_PATTERNS = ['.env.example', '.env.template', 'prompts.yaml', 'prompts.json', 'config.yaml'];
+
+function GitHubModal({ onClose, onComplete, pendingRepo = null, existingRepos = [] }) {
+  const [step, setStep] = useState('auth'); // 'auth' | 'select' | 'scanning'
   const [accessToken, setAccessToken] = useState(null);
-  const [repositories, setRepositories] = useState([]);
+  const [repositories, setRepositories] = useState(existingRepos);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [progress, setProgress] = useState(0);
+  
+  // Scanning state
+  const [scanningRepo, setScanningRepo] = useState(null);
+  const [scanResult, setScanResult] = useState(null);
+  const [scanPhase, setScanPhase] = useState(''); // 'fetching' | 'analyzing' | 'complete'
+
+  // Handle pending repo switch from Sidebar
+  useEffect(() => {
+    if (pendingRepo && accessToken) {
+      handleRepoSelect(pendingRepo);
+    } else if (pendingRepo && existingRepos.length > 0) {
+      // Try to use existing repos without new auth
+      setRepositories(existingRepos);
+      setStep('select');
+      handleRepoSelect(pendingRepo);
+    }
+  }, [pendingRepo]);
 
   useEffect(() => {
+    // Skip if supabase is not configured
+    if (!supabase) {
+      console.warn('Supabase not configured - running in demo mode');
+      return;
+    }
+
     // 檢查 Supabase Auth Session
     checkAuthSession();
     
-    // 監聽 Auth 狀態變化
+    // 監聯 Auth 狀態變化
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       if (session?.provider_token) {
         setAccessToken(session.provider_token);
@@ -26,6 +65,8 @@ function GitHubModal({ onClose, onComplete }) {
   }, []);
 
   const checkAuthSession = async () => {
+    if (!supabase) return;
+    
     const { data: { session } } = await supabase.auth.getSession();
     if (session?.provider_token) {
       setAccessToken(session.provider_token);
@@ -34,6 +75,11 @@ function GitHubModal({ onClose, onComplete }) {
   };
 
   const initiateGitHubLogin = async () => {
+    if (!supabase) {
+      setError('Supabase 未設定。請先配置環境變數。');
+      return;
+    }
+    
     setLoading(true);
     setError('');
     
@@ -100,38 +146,303 @@ function GitHubModal({ onClose, onComplete }) {
   };
 
   const handleRepoSelect = async (repo) => {
-    setLoading(true);
+    // Start scanning flow
+    setScanningRepo(repo);
+    setScanResult(null);
+    setScanPhase('fetching');
+    setStep('scanning');
     setProgress(0);
 
     try {
-      setProgress(25);
-
-      // Analyze repository structure
-      const analysis = await analyzeRepository(repo.full_name, accessToken);
-      setProgress(100);
-
-      setTimeout(() => {
-        onComplete({
-          name: repo.name,
-          fullName: repo.full_name,
-          url: repo.html_url,
-          description: repo.description,
-          language: repo.language,
-          stars: repo.stargazers_count,
-          framework: analysis.framework,
-          healthScore: analysis.healthScore,
-          dependencies: analysis.dependencies,
-          aiPatterns: analysis.aiPatterns,
-          recommendations: analysis.recommendations
-        });
-      }, 500);
+      // Run the scan
+      const scanData = await scanRepositoryStructure(repo);
+      setScanResult(scanData);
 
     } catch (err) {
-      console.error('Selection error:', err);
-      setError(err.message || 'Failed to analyze repository');
-      setLoading(false);
-      setProgress(0);
+      console.error('Scan error:', err);
+      setScanResult({
+        isAIProject: false,
+        detectedFrameworks: [],
+        detectedLibraries: [],
+        aiPatterns: [],
+        techStack: [],
+        confidence: 0,
+        warnings: [err.message || 'Failed to scan repository'],
+        mode: 'generic'
+      });
     }
+  };
+
+  /**
+   * Scan repository structure to detect AI frameworks and patterns
+   */
+  const scanRepositoryStructure = async (repo) => {
+    const fullName = repo.full_name;
+    const headers = {
+      'Accept': 'application/vnd.github.v3+json',
+      ...(accessToken && { 'Authorization': `Bearer ${accessToken}` })
+    };
+
+    const result = {
+      isAIProject: false,
+      detectedFrameworks: [],
+      detectedLibraries: [],
+      aiPatterns: [],
+      techStack: [],
+      confidence: 0,
+      warnings: [],
+      mode: 'standard' // 'standard' | 'generic'
+    };
+
+    try {
+      // Phase 1: Fetch root directory contents
+      setScanPhase('fetching');
+      setProgress(10);
+
+      const contentsResponse = await fetch(
+        `https://api.github.com/repos/${fullName}/contents`,
+        { headers }
+      );
+
+      if (!contentsResponse.ok) {
+        throw new Error(`Failed to fetch repository contents: ${contentsResponse.status}`);
+      }
+
+      const contents = await contentsResponse.json();
+      const files = Array.isArray(contents) ? contents : [];
+      const fileNames = files.map(f => f.name.toLowerCase());
+      const folderNames = files.filter(f => f.type === 'dir').map(f => f.name.toLowerCase());
+
+      setProgress(25);
+
+      // Phase 2: Check for AI folder patterns
+      const matchedFolders = folderNames.filter(folder => 
+        AI_FOLDER_PATTERNS.some(pattern => folder.includes(pattern))
+      );
+      if (matchedFolders.length > 0) {
+        result.aiPatterns.push(...matchedFolders.map(f => `/${f} folder`));
+        result.confidence += matchedFolders.length * 10;
+      }
+
+      // Check for AI file patterns
+      const matchedFiles = fileNames.filter(file =>
+        AI_FILE_PATTERNS.some(pattern => file.includes(pattern.toLowerCase()))
+      );
+      if (matchedFiles.length > 0) {
+        result.aiPatterns.push(...matchedFiles);
+        result.confidence += matchedFiles.length * 5;
+      }
+
+      setProgress(40);
+      setScanPhase('analyzing');
+
+      // Phase 3: Fetch and analyze dependency files
+      const dependencyFiles = [
+        { name: 'requirements.txt', type: 'python' },
+        { name: 'pyproject.toml', type: 'python' },
+        { name: 'package.json', type: 'javascript' },
+        { name: 'Pipfile', type: 'python' },
+        { name: 'environment.yml', type: 'python' },
+        { name: 'setup.py', type: 'python' }
+      ];
+
+      for (const depFile of dependencyFiles) {
+        const fileEntry = files.find(f => f.name.toLowerCase() === depFile.name.toLowerCase());
+        if (fileEntry) {
+          result.techStack.push(depFile.type === 'python' ? 'Python' : 'JavaScript/Node.js');
+          
+          try {
+            const fileResponse = await fetch(fileEntry.download_url);
+            const fileContent = await fileResponse.text();
+            const contentLower = fileContent.toLowerCase();
+
+            // Check for AI libraries
+            for (const keyword of AI_KEYWORDS) {
+              if (contentLower.includes(keyword)) {
+                if (!result.detectedLibraries.includes(keyword)) {
+                  result.detectedLibraries.push(keyword);
+                  result.confidence += 15;
+                }
+              }
+            }
+
+            // Identify primary frameworks
+            if (contentLower.includes('langchain')) {
+              result.detectedFrameworks.push('LangChain');
+            }
+            if (contentLower.includes('llama-index') || contentLower.includes('llamaindex')) {
+              result.detectedFrameworks.push('LlamaIndex');
+            }
+            if (contentLower.includes('openai')) {
+              result.detectedFrameworks.push('OpenAI');
+            }
+            if (contentLower.includes('anthropic')) {
+              result.detectedFrameworks.push('Anthropic');
+            }
+            if (contentLower.includes('transformers') || contentLower.includes('huggingface')) {
+              result.detectedFrameworks.push('HuggingFace');
+            }
+            if (contentLower.includes('autogen')) {
+              result.detectedFrameworks.push('AutoGen');
+            }
+            if (contentLower.includes('semantic-kernel')) {
+              result.detectedFrameworks.push('Semantic Kernel');
+            }
+
+          } catch (err) {
+            console.warn(`Could not fetch ${depFile.name}:`, err);
+          }
+        }
+      }
+
+      setProgress(70);
+
+      // Phase 4: Additional heuristics - check for common AI files
+      const pythonFiles = files.filter(f => f.name.endsWith('.py'));
+      if (pythonFiles.length > 0 && !result.techStack.includes('Python')) {
+        result.techStack.push('Python');
+      }
+
+      // Check for Jupyter notebooks
+      const notebooks = files.filter(f => f.name.endsWith('.ipynb'));
+      if (notebooks.length > 0) {
+        result.aiPatterns.push('Jupyter Notebooks');
+        result.confidence += 10;
+      }
+
+      // Check for Dockerfile
+      if (fileNames.includes('dockerfile') || fileNames.includes('docker-compose.yml') || fileNames.includes('docker-compose.yaml')) {
+        result.techStack.push('Docker');
+      }
+
+      // Phase 4.5: Extract System Prompt from repo
+      result.systemPrompt = null;
+      const promptFiles = ['system_prompt.txt', 'prompts.py', 'prompt.txt', 'system_message.txt'];
+      
+      for (const promptFileName of promptFiles) {
+        const promptFile = files.find(f => f.name.toLowerCase() === promptFileName.toLowerCase());
+        if (promptFile) {
+          try {
+            const promptResponse = await fetch(promptFile.download_url);
+            const promptContent = await promptResponse.text();
+            result.systemPrompt = promptContent;
+            result.promptSource = promptFileName;
+            break;
+          } catch (err) {
+            console.warn(`Could not fetch ${promptFileName}:`, err);
+          }
+        }
+      }
+
+      // If no dedicated prompt file, look for SYSTEM_MESSAGE in main.py or app.py
+      if (!result.systemPrompt) {
+        const mainFiles = ['main.py', 'app.py', 'agent.py', 'bot.py'];
+        for (const mainFileName of mainFiles) {
+          const mainFile = files.find(f => f.name.toLowerCase() === mainFileName.toLowerCase());
+          if (mainFile) {
+            try {
+              const mainResponse = await fetch(mainFile.download_url);
+              const mainContent = await mainResponse.text();
+              
+              // Look for SYSTEM_MESSAGE, SYSTEM_PROMPT, or system_prompt variable
+              const patterns = [
+                /SYSTEM_MESSAGE\s*=\s*['"]{1,3}([\s\S]*?)['"]{1,3}/,
+                /SYSTEM_PROMPT\s*=\s*['"]{1,3}([\s\S]*?)['"]{1,3}/,
+                /system_prompt\s*=\s*['"]{1,3}([\s\S]*?)['"]{1,3}/,
+                /system_message\s*=\s*['"]{1,3}([\s\S]*?)['"]{1,3}/
+              ];
+              
+              for (const pattern of patterns) {
+                const match = mainContent.match(pattern);
+                if (match && match[1]) {
+                  result.systemPrompt = match[1].trim();
+                  result.promptSource = `${mainFileName} (extracted)`;
+                  break;
+                }
+              }
+              
+              if (result.systemPrompt) break;
+            } catch (err) {
+              console.warn(`Could not fetch ${mainFileName}:`, err);
+            }
+          }
+        }
+      }
+
+      setProgress(85);
+
+      // Phase 5: Determine final result
+      result.detectedFrameworks = [...new Set(result.detectedFrameworks)];
+      result.detectedLibraries = [...new Set(result.detectedLibraries)];
+      result.techStack = [...new Set(result.techStack)];
+
+      // Determine if it's an AI project
+      result.isAIProject = result.detectedFrameworks.length > 0 || 
+                           result.detectedLibraries.length >= 2 ||
+                           result.confidence >= 30;
+
+      result.confidence = Math.min(result.confidence, 100);
+      result.mode = result.isAIProject ? 'standard' : 'generic';
+
+      if (!result.isAIProject) {
+        result.warnings.push('No standard AI/ML dependencies detected');
+        if (result.techStack.length === 0) {
+          result.warnings.push('Could not determine technology stack');
+        }
+      }
+
+      setProgress(100);
+      setScanPhase('complete');
+
+      return result;
+
+    } catch (err) {
+      console.error('Scan error:', err);
+      result.warnings.push(err.message);
+      result.mode = 'generic';
+      setScanPhase('complete');
+      return result;
+    }
+  };
+
+  const handleImportProject = async () => {
+    if (!scanningRepo || !scanResult) return;
+
+    setLoading(true);
+
+    const analysis = await analyzeRepository(scanningRepo.full_name, accessToken);
+
+    onComplete({
+      name: scanningRepo.name,
+      fullName: scanningRepo.full_name,
+      url: scanningRepo.html_url,
+      description: scanningRepo.description,
+      language: scanningRepo.language,
+      stars: scanningRepo.stargazers_count,
+      framework: scanResult.detectedFrameworks[0] || analysis.framework,
+      healthScore: analysis.healthScore,
+      dependencies: [...new Set([...scanResult.detectedLibraries, ...analysis.dependencies])],
+      aiPatterns: [...new Set([...scanResult.aiPatterns, ...analysis.aiPatterns])],
+      recommendations: analysis.recommendations,
+      techStack: scanResult.techStack,
+      detectedFrameworks: scanResult.detectedFrameworks,
+      isAIProject: scanResult.isAIProject,
+      scanConfidence: scanResult.confidence,
+      mode: scanResult.mode,
+      // System prompt extraction
+      systemPrompt: scanResult.systemPrompt,
+      promptSource: scanResult.promptSource,
+      // Pass accessToken for API calls
+      accessToken: accessToken
+    }, repositories); // Pass repositories list to parent
+  };
+
+  const handleBackToSelect = () => {
+    setStep('select');
+    setScanningRepo(null);
+    setScanResult(null);
+    setScanPhase('');
+    setProgress(0);
   };
 
   const analyzeRepository = async (fullName, token) => {
@@ -210,7 +521,9 @@ function GitHubModal({ onClose, onComplete }) {
   };
 
   const handleLogout = async () => {
-    await supabase.auth.signOut();
+    if (supabase) {
+      await supabase.auth.signOut();
+    }
     setAccessToken(null);
     setRepositories([]);
     setStep('auth');
@@ -303,39 +616,66 @@ function GitHubModal({ onClose, onComplete }) {
               WebkitTextFillColor: 'transparent',
               backgroundClip: 'text'
             }}>
-              {step === 'auth' ? 'Connect GitHub' : 'Select Repository'}
+              {step === 'auth' ? 'Connect GitHub' : step === 'scanning' ? 'Scanning Repository' : 'Select Repository'}
             </h2>
             <p style={{
               margin: '4px 0 0 0',
               color: '#8b92a8',
               fontSize: '14px'
             }}>
-              {step === 'auth' ? 'Authorize Nexus AI to access your repositories' : `${repositories.length} authorized repositories`}
+              {step === 'auth' 
+                ? 'Authorize Nexus AI to access your repositories' 
+                : step === 'scanning'
+                  ? scanningRepo?.name || 'Analyzing project structure...'
+                  : `${repositories.length} authorized repositories`}
             </p>
           </div>
-          {step === 'select' && (
-            <button
-              onClick={handleLogout}
-              style={{
-                padding: '8px 16px',
-                background: 'rgba(255, 68, 68, 0.1)',
-                border: '1px solid rgba(255, 68, 68, 0.3)',
-                borderRadius: '6px',
-                color: '#ff6b6b',
-                fontSize: '13px',
-                cursor: 'pointer',
-                transition: 'all 0.3s ease'
-              }}
-              onMouseEnter={(e) => {
-                e.target.style.background = 'rgba(255, 68, 68, 0.2)';
-              }}
-              onMouseLeave={(e) => {
-                e.target.style.background = 'rgba(255, 68, 68, 0.1)';
-              }}
-            >
-              Logout
-            </button>
-          )}
+            {step === 'select' && (
+              <button
+                onClick={handleLogout}
+                style={{
+                  padding: '8px 16px',
+                  background: 'rgba(255, 68, 68, 0.1)',
+                  border: '1px solid rgba(255, 68, 68, 0.3)',
+                  borderRadius: '6px',
+                  color: '#ff6b6b',
+                  fontSize: '13px',
+                  cursor: 'pointer',
+                  transition: 'all 0.3s ease'
+                }}
+                onMouseEnter={(e) => {
+                  e.target.style.background = 'rgba(255, 68, 68, 0.2)';
+                }}
+                onMouseLeave={(e) => {
+                  e.target.style.background = 'rgba(255, 68, 68, 0.1)';
+                }}
+              >
+                Logout
+              </button>
+            )}
+            {step === 'scanning' && (
+              <button
+                onClick={handleBackToSelect}
+                style={{
+                  padding: '8px 16px',
+                  background: 'rgba(100, 150, 255, 0.1)',
+                  border: '1px solid rgba(100, 150, 255, 0.3)',
+                  borderRadius: '6px',
+                  color: '#8b92a8',
+                  fontSize: '13px',
+                  cursor: 'pointer',
+                  transition: 'all 0.3s ease'
+                }}
+                onMouseEnter={(e) => {
+                  e.target.style.background = 'rgba(100, 150, 255, 0.2)';
+                }}
+                onMouseLeave={(e) => {
+                  e.target.style.background = 'rgba(100, 150, 255, 0.1)';
+                }}
+              >
+                ← Back
+              </button>
+            )}
         </div>
 
         {/* Content Section */}
@@ -557,6 +897,450 @@ function GitHubModal({ onClose, onComplete }) {
                     </div>
                   </div>
                 ))}
+              </div>
+            )}
+
+            {/* Step 3: Scanning Repository */}
+            {step === 'scanning' && (
+              <div style={{ padding: '20px 0' }}>
+                {/* Scanning Animation - Show while scanning */}
+                {!scanResult && (
+                  <div style={{ textAlign: 'center', padding: '40px 0' }}>
+                    <div style={{
+                      width: '80px',
+                      height: '80px',
+                      margin: '0 auto 24px',
+                      position: 'relative'
+                    }}>
+                      <Search 
+                        size={40} 
+                        color="#00d4ff" 
+                        style={{
+                          position: 'absolute',
+                          top: '50%',
+                          left: '50%',
+                          transform: 'translate(-50%, -50%)',
+                          animation: 'pulse 1.5s ease-in-out infinite'
+                        }}
+                      />
+                      <div style={{
+                        position: 'absolute',
+                        inset: 0,
+                        border: '3px solid rgba(0, 212, 255, 0.2)',
+                        borderTopColor: '#00d4ff',
+                        borderRadius: '50%',
+                        animation: 'spin 1s linear infinite'
+                      }} />
+                    </div>
+                    
+                    <h3 style={{
+                      margin: '0 0 8px 0',
+                      fontSize: '18px',
+                      fontWeight: '600',
+                      color: '#e0e0e0'
+                    }}>
+                      Scanning Project Structure...
+                    </h3>
+                    <p style={{ color: '#8b92a8', fontSize: '14px', margin: '0 0 24px 0' }}>
+                      {scanPhase === 'fetching' ? 'Fetching repository contents...' : 'Analyzing dependencies and patterns...'}
+                    </p>
+
+                    {/* Progress Bar */}
+                    <div style={{
+                      width: '100%',
+                      height: '6px',
+                      background: 'rgba(100, 150, 255, 0.2)',
+                      borderRadius: '3px',
+                      overflow: 'hidden'
+                    }}>
+                      <div style={{
+                        height: '100%',
+                        background: 'linear-gradient(90deg, #00d4ff, #a855f7)',
+                        width: `${progress}%`,
+                        transition: 'width 0.3s ease',
+                        borderRadius: '3px'
+                      }} />
+                    </div>
+
+                    {/* Scan Phases */}
+                    <div style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      marginTop: '16px',
+                      fontSize: '12px',
+                      color: '#6b7280'
+                    }}>
+                      <span style={{ color: progress >= 25 ? '#00d4ff' : '#6b7280' }}>
+                        ✓ Fetch Contents
+                      </span>
+                      <span style={{ color: progress >= 50 ? '#00d4ff' : '#6b7280' }}>
+                        ✓ Check Folders
+                      </span>
+                      <span style={{ color: progress >= 75 ? '#00d4ff' : '#6b7280' }}>
+                        ✓ Analyze Deps
+                      </span>
+                      <span style={{ color: progress >= 100 ? '#00d4ff' : '#6b7280' }}>
+                        ✓ Complete
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Scan Results */}
+                {scanResult && (
+                  <div>
+                    {/* Result Header */}
+                    <div style={{
+                      padding: '24px',
+                      background: scanResult.isAIProject 
+                        ? 'rgba(16, 185, 129, 0.1)' 
+                        : 'rgba(245, 158, 11, 0.1)',
+                      border: `1px solid ${scanResult.isAIProject ? 'rgba(16, 185, 129, 0.3)' : 'rgba(245, 158, 11, 0.3)'}`,
+                      borderRadius: '12px',
+                      marginBottom: '24px',
+                      textAlign: 'center'
+                    }}>
+                      {scanResult.isAIProject ? (
+                        <>
+                          <CheckCircle size={48} color="#10b981" style={{ marginBottom: '12px' }} />
+                          <h3 style={{
+                            margin: '0 0 8px 0',
+                            fontSize: '20px',
+                            fontWeight: '700',
+                            color: '#10b981'
+                          }}>
+                            AI Framework Detected!
+                          </h3>
+                          <p style={{ color: '#8b92a8', fontSize: '14px', margin: 0 }}>
+                            {scanResult.detectedFrameworks.length > 0 
+                              ? `Found: ${scanResult.detectedFrameworks.join(' + ')}`
+                              : `Detected ${scanResult.detectedLibraries.length} AI/ML libraries`}
+                          </p>
+                        </>
+                      ) : (
+                        <>
+                          <AlertTriangle size={48} color="#f59e0b" style={{ marginBottom: '12px' }} />
+                          <h3 style={{
+                            margin: '0 0 8px 0',
+                            fontSize: '20px',
+                            fontWeight: '700',
+                            color: '#f59e0b'
+                          }}>
+                            No Standard AI Dependencies Found
+                          </h3>
+                          <p style={{ color: '#8b92a8', fontSize: '14px', margin: 0 }}>
+                            Import anyway? Project will run in Generic Mode.
+                          </p>
+                        </>
+                      )}
+                    </div>
+
+                    {/* Detected Items */}
+                    <div style={{
+                      display: 'grid',
+                      gridTemplateColumns: '1fr 1fr',
+                      gap: '16px',
+                      marginBottom: '24px'
+                    }}>
+                      {/* Frameworks */}
+                      <div style={{
+                        padding: '16px',
+                        background: 'rgba(30, 41, 66, 0.4)',
+                        border: '1px solid rgba(100, 150, 255, 0.2)',
+                        borderRadius: '10px'
+                      }}>
+                        <div style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '8px',
+                          marginBottom: '12px',
+                          color: '#a855f7'
+                        }}>
+                          <Sparkles size={18} />
+                          <span style={{ fontSize: '13px', fontWeight: '600' }}>AI Frameworks</span>
+                        </div>
+                        {scanResult.detectedFrameworks.length > 0 ? (
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                            {scanResult.detectedFrameworks.map((fw, i) => (
+                              <span key={i} style={{
+                                padding: '4px 10px',
+                                background: 'rgba(168, 85, 247, 0.2)',
+                                border: '1px solid rgba(168, 85, 247, 0.4)',
+                                borderRadius: '6px',
+                                fontSize: '12px',
+                                color: '#a855f7'
+                              }}>
+                                {fw}
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <span style={{ color: '#6b7280', fontSize: '13px' }}>None detected</span>
+                        )}
+                      </div>
+
+                      {/* Libraries */}
+                      <div style={{
+                        padding: '16px',
+                        background: 'rgba(30, 41, 66, 0.4)',
+                        border: '1px solid rgba(100, 150, 255, 0.2)',
+                        borderRadius: '10px'
+                      }}>
+                        <div style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '8px',
+                          marginBottom: '12px',
+                          color: '#00d4ff'
+                        }}>
+                          <Package size={18} />
+                          <span style={{ fontSize: '13px', fontWeight: '600' }}>Libraries</span>
+                        </div>
+                        {scanResult.detectedLibraries.length > 0 ? (
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                            {scanResult.detectedLibraries.slice(0, 6).map((lib, i) => (
+                              <span key={i} style={{
+                                padding: '4px 10px',
+                                background: 'rgba(0, 212, 255, 0.1)',
+                                border: '1px solid rgba(0, 212, 255, 0.3)',
+                                borderRadius: '6px',
+                                fontSize: '12px',
+                                color: '#00d4ff'
+                              }}>
+                                {lib}
+                              </span>
+                            ))}
+                            {scanResult.detectedLibraries.length > 6 && (
+                              <span style={{
+                                padding: '4px 10px',
+                                background: 'rgba(100, 150, 255, 0.1)',
+                                borderRadius: '6px',
+                                fontSize: '12px',
+                                color: '#8b92a8'
+                              }}>
+                                +{scanResult.detectedLibraries.length - 6} more
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          <span style={{ color: '#6b7280', fontSize: '13px' }}>None detected</span>
+                        )}
+                      </div>
+
+                      {/* Patterns */}
+                      <div style={{
+                        padding: '16px',
+                        background: 'rgba(30, 41, 66, 0.4)',
+                        border: '1px solid rgba(100, 150, 255, 0.2)',
+                        borderRadius: '10px'
+                      }}>
+                        <div style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '8px',
+                          marginBottom: '12px',
+                          color: '#10b981'
+                        }}>
+                          <Folder size={18} />
+                          <span style={{ fontSize: '13px', fontWeight: '600' }}>AI Patterns</span>
+                        </div>
+                        {scanResult.aiPatterns.length > 0 ? (
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                            {scanResult.aiPatterns.map((pattern, i) => (
+                              <span key={i} style={{
+                                padding: '4px 10px',
+                                background: 'rgba(16, 185, 129, 0.1)',
+                                border: '1px solid rgba(16, 185, 129, 0.3)',
+                                borderRadius: '6px',
+                                fontSize: '12px',
+                                color: '#10b981'
+                              }}>
+                                {pattern}
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <span style={{ color: '#6b7280', fontSize: '13px' }}>None detected</span>
+                        )}
+                      </div>
+
+                      {/* Tech Stack */}
+                      <div style={{
+                        padding: '16px',
+                        background: 'rgba(30, 41, 66, 0.4)',
+                        border: '1px solid rgba(100, 150, 255, 0.2)',
+                        borderRadius: '10px'
+                      }}>
+                        <div style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '8px',
+                          marginBottom: '12px',
+                          color: '#f59e0b'
+                        }}>
+                          <FileCode size={18} />
+                          <span style={{ fontSize: '13px', fontWeight: '600' }}>Tech Stack</span>
+                        </div>
+                        {scanResult.techStack.length > 0 ? (
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                            {scanResult.techStack.map((tech, i) => (
+                              <span key={i} style={{
+                                padding: '4px 10px',
+                                background: 'rgba(245, 158, 11, 0.1)',
+                                border: '1px solid rgba(245, 158, 11, 0.3)',
+                                borderRadius: '6px',
+                                fontSize: '12px',
+                                color: '#f59e0b'
+                              }}>
+                                {tech}
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <span style={{ color: '#6b7280', fontSize: '13px' }}>Unknown</span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Confidence Score */}
+                    <div style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      padding: '12px 16px',
+                      background: 'rgba(30, 41, 66, 0.4)',
+                      border: '1px solid rgba(100, 150, 255, 0.2)',
+                      borderRadius: '8px',
+                      marginBottom: '24px'
+                    }}>
+                      <span style={{ color: '#8b92a8', fontSize: '13px' }}>Detection Confidence</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                        <div style={{
+                          width: '120px',
+                          height: '6px',
+                          background: 'rgba(100, 150, 255, 0.2)',
+                          borderRadius: '3px',
+                          overflow: 'hidden'
+                        }}>
+                          <div style={{
+                            width: `${scanResult.confidence}%`,
+                            height: '100%',
+                            background: scanResult.confidence >= 60 
+                              ? '#10b981' 
+                              : scanResult.confidence >= 30 
+                                ? '#f59e0b' 
+                                : '#ff4444',
+                            borderRadius: '3px',
+                            transition: 'width 0.5s ease'
+                          }} />
+                        </div>
+                        <span style={{
+                          fontSize: '14px',
+                          fontWeight: '600',
+                          color: scanResult.confidence >= 60 
+                            ? '#10b981' 
+                            : scanResult.confidence >= 30 
+                              ? '#f59e0b' 
+                              : '#ff4444'
+                        }}>
+                          {scanResult.confidence}%
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Mode Tag */}
+                    {!scanResult.isAIProject && (
+                      <div style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '8px',
+                        padding: '12px 16px',
+                        background: 'rgba(245, 158, 11, 0.1)',
+                        border: '1px solid rgba(245, 158, 11, 0.3)',
+                        borderRadius: '8px',
+                        marginBottom: '24px'
+                      }}>
+                        <AlertTriangle size={18} color="#f59e0b" />
+                        <span style={{ color: '#f59e0b', fontSize: '13px' }}>
+                          This project will be imported in <strong>Generic Mode</strong>. Some AI-specific features may be limited.
+                        </span>
+                      </div>
+                    )}
+
+                    {/* Action Buttons */}
+                    <div style={{ display: 'flex', gap: '12px' }}>
+                      <button
+                        onClick={handleBackToSelect}
+                        style={{
+                          flex: 1,
+                          padding: '14px 24px',
+                          background: 'rgba(100, 150, 255, 0.1)',
+                          border: '1px solid rgba(100, 150, 255, 0.3)',
+                          borderRadius: '10px',
+                          color: '#8b92a8',
+                          fontSize: '15px',
+                          fontWeight: '600',
+                          cursor: 'pointer',
+                          transition: 'all 0.3s ease'
+                        }}
+                        onMouseEnter={(e) => {
+                          e.target.style.background = 'rgba(100, 150, 255, 0.2)';
+                        }}
+                        onMouseLeave={(e) => {
+                          e.target.style.background = 'rgba(100, 150, 255, 0.1)';
+                        }}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={handleImportProject}
+                        disabled={loading}
+                        style={{
+                          flex: 2,
+                          padding: '14px 24px',
+                          background: scanResult.isAIProject
+                            ? 'linear-gradient(135deg, #10b981, #059669)'
+                            : 'linear-gradient(135deg, #f59e0b, #d97706)',
+                          border: 'none',
+                          borderRadius: '10px',
+                          color: '#fff',
+                          fontSize: '15px',
+                          fontWeight: '600',
+                          cursor: loading ? 'not-allowed' : 'pointer',
+                          opacity: loading ? 0.7 : 1,
+                          transition: 'all 0.3s ease',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: '8px',
+                          boxShadow: scanResult.isAIProject
+                            ? '0 4px 20px rgba(16, 185, 129, 0.4)'
+                            : '0 4px 20px rgba(245, 158, 11, 0.4)'
+                        }}
+                        onMouseEnter={(e) => {
+                          if (!loading) {
+                            e.target.style.transform = 'translateY(-2px)';
+                          }
+                        }}
+                        onMouseLeave={(e) => {
+                          e.target.style.transform = 'translateY(0)';
+                        }}
+                      >
+                        {loading ? (
+                          <>
+                            <Loader2 size={18} style={{ animation: 'spin 1s linear infinite' }} />
+                            Importing...
+                          </>
+                        ) : (
+                          <>
+                            <CheckCircle size={18} />
+                            {scanResult.isAIProject ? 'Import Project' : 'Import Anyway'}
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>
